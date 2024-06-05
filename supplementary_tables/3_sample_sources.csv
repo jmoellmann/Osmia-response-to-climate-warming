@@ -1,0 +1,17 @@
+﻿site ID,location,species,sex,quantity,latitude,longitude,elevation,avg_temp
+KZ1,Konstanz,bicornis,male,200,47.7084536,9.0816667,408,9.6
+KZ1,Konstanz,bicornis,female,200,47.7084536,9.0816667,408,9.6
+KZ1,Konstanz,cornuta,male,200,47.7084536,9.0816667,408,9.6
+KZ1,Konstanz,cornuta,female,200,47.7084536,9.0816667,408,9.6
+SAT1,Schaerding,bicornis,male,200,48.4589254,13.4361607,306,8.9
+SAT1,Schaerding,bicornis,female,200,48.4589254,13.4361607,306,8.9
+SAT1,Schaerding,cornuta,male,200,48.4589254,13.4361607,306,8.9
+SAT1,Schaerding,cornuta,female,200,48.4589254,13.4361607,306,8.9
+GW1,Greifswald,bicornis,male,200,54.0797158,13.2371543,13,8.2
+GW1,Greifswald,bicornis,female,200,54.0797158,13.2371543,13,8.2
+SHZ1,Suedharz,cornuta,male,200,51.528822,10.95245,246,8.2
+SHZ1,Suedharz,cornuta,female,200,51.528822,10.95245,246,8.2
+NP1,Nordpfalz,bicornis,male,200,49.6650537,7.78546522,431,7.7
+NP1,Nordpfalz,bicornis,female,200,49.6650537,7.78546522,431,7.7
+NP1,Nordpfalz,cornuta,male,200,49.6650537,7.78546522,431,7.7
+NP1,Nordpfalz,cornuta,female,200,49.6650537,7.78546522,431,7.7
