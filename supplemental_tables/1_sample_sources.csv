@@ -1,0 +1,9 @@
+﻿site ID,location,species,latitude,longitude,elevation,avg_temp
+KZ1,Konstanz,bicornis,47.686,9.166,408,9.6
+KZ1,Konstanz,cornuta,47.686,9.166,408,9.6
+SAT1,Schaerding,bicornis,48.459,13.437,306,8.9
+SAT1,Schaerding,cornuta,48.459,13.437,306,8.9
+GW1,Greifswald,bicornis,54.079,13.237,13,8.2
+SHZ1,Suedharz,cornuta,51.529,10.952,246,8.2
+NP1,Nordpfalz,bicornis,49.663,7.783,431,7.7
+NP1,Nordpfalz,cornuta,49.663,7.783,431,7.7

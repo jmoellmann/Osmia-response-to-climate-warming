@@ -1,0 +1,948 @@
+---
+title: "Data Analysis "
+author: "Jannik Möllmann"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+## Libraries
+```{r, message=F}
+
+library(tidyverse)
+library(lme4)
+library(lubridate)
+library(mgcv)
+library(emmeans)
+library(Rmisc)
+library(ggtext)
+library(modelr)
+library(patchwork)
+```
+
+
+## Custom Color Palettes
+```{r}
+customPalette1 <- c("#EDE100", "#E69F00", "#D55E00")
+customPalette2 <- c("#11B989", "#14701D", "#F0266A", "#B20980")
+```
+
+## Load data
+```{r}
+raw_data <- read_tsv("supplemental_tables/3_raw_data.tsv")
+temp_logger_data <- 
+  read_tsv("supplemental_tables/2_temp_logger_data.tsv")
+```
+
+## Error corrections and outlier removal
+```{r, warning = F}
+error_plot_1 <- raw_data %>% 
+  dplyr::filter(emergence_status %in% c("emerged", "excised"), !is.na(emergence_condition)) %>% 
+  select(sample_ID, species, emergence_condition, emergence_date, emergence_weight, sex, starts_with("week"), length) %>% 
+  ggplot() + aes(x = emergence_weight, y = week0, color = emergence_condition) + geom_point() + 
+  geom_line(aes(x = emergence_weight, y = emergence_weight), color = "black") + 
+  geom_text(aes(label = sample_ID), size = 2) +
+  facet_wrap(vars(species)) + ylab("start weight")
+error_plot_1
+```
+
+Removing observations where bees have gained weight over the course of the experiment,  as these surely represent errors in manual data entry (samples: "KB-40", "SB-166", "HC-156", "KC-151", "NC-48", "NC-187", "SC-72")
+```{r}
+raw_data <- raw_data %>% dplyr::filter(is.na(emergence_status) | emergence_weight <= week0)
+```
+
+Creating a subset data frame in long format that contains only samples that were weighed (tracked) weekly
+```{r}
+tracked_longer <- raw_data %>% dplyr::filter(batch == "weighing") %>% 
+  mutate(start_weight = week0) %>% 
+  pivot_longer(starts_with("week"), names_to = "week", values_to = "weight") %>% 
+  mutate(rel_weight = weight / start_weight) %>% 
+  mutate(week = as.numeric(str_extract(week, "\\d+")))
+```
+
+
+```{r, warning = F}
+error_plot_2 <- tracked_longer %>% 
+  dplyr::filter(!(genus == "Osmia" & is.na(sex)) & 
+                  !is.na(emergence_condition)) %>% 
+  ggplot() + aes(x = week, y = rel_weight) + 
+  geom_text(aes(label = sample_ID), size = 2) + 
+  facet_wrap(vars(species, sex, emergence_condition))
+error_plot_2
+```
+
+Remove observations where obvious errors during weight loss tracking have occured ("HC-198", GB-200", "KB-65", "HC-4", "KC-188")
+```{r}
+raw_data <- raw_data %>% 
+  dplyr::filter(!(sample_ID %in% c("HC-198", "GB-200", "KB-65", "HC-4", "KC-188")))
+```
+
+Removing SB-129 as the cocoon was completely empty with no trace of its occupant
+```{r}
+raw_data <- raw_data %>% dplyr::filter(sample_ID != "SB-129")
+```
+
+Removing individuals with large discrepancies between last measured weight during weight tracking and emergence weight that emerged alive
+```{r, warning = F}
+error_plot_3 <- raw_data %>% dplyr::filter(!is.na(week1)) %>% 
+  pivot_longer(starts_with("week"), names_to = "week", values_to = "weight") %>% 
+  group_by(sample_ID) %>% fill(weight) %>% ungroup() %>% dplyr::filter(week == "week21") %>% 
+  ggplot() + aes(y = weight, x = emergence_weight, color = emergence_condition) + 
+  geom_point() + geom_text(aes(label = sample_ID), size = 2) + 
+  geom_line(aes(x = emergence_weight, y = emergence_weight), color = "black") + 
+  facet_wrap(vars(species)) + ylab("Last available tracking weight")
+error_plot_3
+```
+
+
+```{r}
+raw_data <- raw_data %>% dplyr::filter(sample_ID != "HC-71")
+```
+
+# Lastly, removing parasites from the dataset, as they are not going to be analysed
+```{r}
+clean_data <- raw_data %>% 
+  dplyr::filter(species %in% c("O. bicornis", "O. cornuta")) %>% 
+  mutate(sex_symbolic = ifelse(sex == "female", "\U2640", "\U2642"))
+```
+
+## Subset tables
+
+```{r, message=F, warning=F}
+
+# Table 1: Emerged, alive mason bees (n = 994)
+# Table 2: Weight-loss tracked, emerged, alive mason bees (n = 753, long format n = 16566)
+# Table 3: All mason bees, alive or dead, emerged or excised (n = 1113)
+# Table 4: Summary survival stats on table 3 (n = 12)
+
+# Table 1
+complete_data <- clean_data %>% filter(emergence_status %in% c("emerged")) %>% 
+  filter(emergence_condition == "alive", genus == "Osmia", !is.na(sex)) %>% 
+  mutate(start_weight = week0) %>% 
+  mutate(temperature = as.factor(temperature),
+         species = as.factor(species),
+         sample_ID = as.factor(sample_ID),
+         sex = as.factor(sex),
+         population = as.factor(population)) %>% 
+  mutate(rel_weight_emergence = emergence_weight / start_weight) %>% 
+  mutate(weight_loss_per_day = 
+           100 * (1 - rel_weight_emergence) / (julian_emergence_date + 31)) %>% 
+  mutate(sex_symbolic = ifelse(sex == "female", "\U2640", "\U2642"))
+
+# Table 2
+weekly_tracking_data <- complete_data %>% filter(batch == "weighing") %>% 
+  mutate(start_weight = week0) %>% 
+  pivot_longer(starts_with("week"), names_to = "week", values_to = "weight") %>% 
+  mutate(week = as.numeric(str_extract(week, "\\d+"))) %>% 
+  mutate(weight = ifelse(is.na(weight), emergence_weight, weight)) %>% 
+  mutate(rel_weight = weight / start_weight)
+
+# Table 3
+survival_data <- clean_data %>% 
+  filter(genus == "Osmia", !is.na(emergence_condition), !is.na(sex)) %>% 
+  mutate(start_weight = week0) %>% 
+  mutate(temperature = as.factor(temperature),
+         species = as.factor(species),
+         sample_ID = as.factor(sample_ID),
+         sex = as.factor(sex),
+         population = as.factor(population)) %>% 
+  mutate(rel_weight_emergence = emergence_weight / start_weight) %>% 
+  mutate(survival = as.factor(emergence_condition))
+
+# Table 4
+survival_summary_data <- survival_data %>% group_by(temperature, species, sex) %>% 
+  dplyr::summarise(survived = sum(survival == "alive"),
+                   total = n(), rel_survival = survived / total) %>% ungroup() %>% 
+  mutate(sex_symbolic = ifelse(sex == "female", "\U2640", "\U2642")) 
+
+```
+
+## Descriptive summary stats
+
+### Emergence stats
+```{r}
+# General emergence stats:
+emergence_stats <- complete_data %>% group_by(temperature) %>% 
+  dplyr::summarise(mean = mean(julian_emergence_date), 
+                   sd = sd(julian_emergence_date), n = n())
+emergence_stats
+
+# Mean difference:
+emergence_stats[1,"mean"] - emergence_stats[2,"mean"] # control vs SSP2-4.5
+emergence_stats[1,"mean"] - emergence_stats[3,"mean"] # control vs SSP5-8.5
+
+  # Standard error of mean difference:
+sqrt(emergence_stats[1,"sd"] ** 2 / emergence_stats[1,"n"] + 
+       emergence_stats[2,"sd"] ** 2 / emergence_stats[2,"n"]) # control vs SSP2-4.5
+sqrt(emergence_stats[1,"sd"] ** 2 / emergence_stats[1,"n"] + 
+       emergence_stats[3,"sd"] ** 2 / emergence_stats[3,"n"]) # control vs SSP5-8.5
+
+# ------------------------
+# Sex-specific (bicornis):
+emstats_sex_bi <- complete_data %>% 
+  dplyr::filter(species == "O. bicornis") %>% group_by(sex, temperature) %>% 
+  dplyr::summarise(mean = mean(julian_emergence_date), 
+                   sd = sd(julian_emergence_date), n = n())
+emstats_sex_bi
+
+# Mean difference:
+emstats_sex_bi[1,"mean"] - emstats_sex_bi[4,"mean"] # control
+emstats_sex_bi[2,"mean"] - emstats_sex_bi[5,"mean"] # SSP2-4.5
+emstats_sex_bi[3,"mean"] - emstats_sex_bi[6,"mean"] # SSP5-8.5
+
+# Standard error of mean difference:
+sqrt(emstats_sex_bi[1,"sd"] ** 2 / emstats_sex_bi[1,"n"] + 
+       emstats_sex_bi[4,"sd"] ** 2 / emstats_sex_bi[4,"n"]) # control
+sqrt(emstats_sex_bi[2,"sd"] ** 2 / emstats_sex_bi[2,"n"] + 
+       emstats_sex_bi[5,"sd"] ** 2 / emstats_sex_bi[5,"n"]) # SSP2-4.5
+sqrt(emstats_sex_bi[3,"sd"] ** 2 / emstats_sex_bi[3,"n"] + 
+       emstats_sex_bi[6,"sd"] ** 2 / emstats_sex_bi[6,"n"]) # SSP5-8.5
+
+# -----------------------
+# Sex-specific (cornuta):
+emstats_sex_co <- complete_data %>% 
+  dplyr::filter(species == "O. cornuta") %>% group_by(sex, temperature) %>% 
+  dplyr::summarise(mean = mean(julian_emergence_date), 
+                   sd = sd(julian_emergence_date), n = n())
+emstats_sex_co
+
+# Mean difference:
+emstats_sex_co[1,"mean"] - emstats_sex_co[4,"mean"] # control
+emstats_sex_co[2,"mean"] - emstats_sex_co[5,"mean"] # SSP2-4.5
+emstats_sex_co[3,"mean"] - emstats_sex_co[6,"mean"] # SSP5-8.5
+
+# Standard error of mean difference:
+sqrt(emstats_sex_co[1,"sd"] ** 2 / emstats_sex_co[1,"n"] + 
+       emstats_sex_co[4,"sd"] ** 2 / emstats_sex_co[4,"n"]) # control
+sqrt(emstats_sex_co[2,"sd"] ** 2 / emstats_sex_co[2,"n"] + 
+       emstats_sex_co[5,"sd"] ** 2 / emstats_sex_co[5,"n"]) # SSP2-4.5
+sqrt(emstats_sex_co[3,"sd"] ** 2 / emstats_sex_co[3,"n"] + 
+       emstats_sex_co[6,"sd"] ** 2 / emstats_sex_co[6,"n"]) # SSP5-8.5
+
+# Species differences:
+emstats_species <- complete_data %>% group_by(species, sex) %>% 
+  dplyr::summarise(mean = mean(julian_emergence_date), 
+                   sd = sd(julian_emergence_date), n = n())
+emstats_species
+
+# Mean difference:
+emstats_species[1,"mean"] - emstats_species[3,"mean"] # females
+emstats_species[2,"mean"] - emstats_species[4,"mean"] # males
+
+# Standard error of mean difference:
+sqrt(emstats_species[1,"sd"] ** 2 / emstats_species[1,"n"] + 
+       emstats_species[3,"sd"] ** 2 / emstats_species[3,"n"]) # females
+sqrt(emstats_species[2,"sd"] ** 2 / emstats_species[2,"n"] + 
+       emstats_species[4,"sd"] ** 2 / emstats_species[4,"n"]) # males
+
+```
+### Survival stats
+```{r}
+# General emergence stats:
+survival_stats <- survival_data %>% group_by(species, sex) %>% 
+  dplyr::count(survival) %>% 
+  pivot_wider(names_from = survival, values_from = n) %>% 
+  mutate(survival_rate = alive / (alive + dead) * 100)
+
+survival_stats
+```
+
+### Weight loss stats
+```{r}
+# General emergence stats:
+wl_stats <- complete_data %>% group_by(temperature) %>% 
+  mutate(weight_loss_emergence = 100 * (1 - rel_weight_emergence)) %>% 
+  dplyr::summarise(mean = mean(weight_loss_emergence), 
+                   sd = sd(weight_loss_emergence), n = n(),
+                   se = sd / sqrt(n))
+wl_stats
+
+# Relative difference in weight loss means:
+wl_stats[2,"mean"] / wl_stats[1,"mean"] # control vs SSP2-4.5
+wl_stats[3,"mean"] / wl_stats[1,"mean"] # control vs SSP5-8.5
+```
+
+### Temperature at emergence stats
+```{r}
+temp_at_emergence <- temp_logger_data %>% filter(cabinet %in% c("C", "E", "F")) %>% 
+  mutate(date = lubridate::as_date(datetime), 
+         time = lubridate::hms(stringr::str_split_i(datetime, pattern = " ", i = 2))) %>% 
+  dplyr::filter(hour(time) >= 6 & hour(time) < 12) %>% 
+  group_by(date, group) %>% dplyr::reframe(mean_temp_emergence = mean(temp), group) %>% 
+  distinct() %>% 
+  mutate(temperature = 
+           case_when(group == "normal" ~ "control", 
+                     group == "plus3" ~ "SSP2-4.5",
+                     group == "plus6" ~ "SSP5-8.5")) %>% 
+  mutate(emergence_date = date) %>% 
+  select(-group, -date)
+  
+complete_data %>% left_join(temp_at_emergence) %>% 
+  group_by(species, temperature) %>% 
+  dplyr::summarise(mean_temp = mean(mean_temp_emergence), 
+                   sd = sd(mean_temp_emergence), n = n(),
+                   se = sd / sqrt(n))
+```
+
+
+## Models
+
+### Emergence model
+```{r, message=F, warning=F}
+# Model 1: LME with with the full data set, including all samples that emerged during
+# the course of the experiment and their respective weight loss relative to the 
+# start of the experiment. Weekly-tracking data is not used in favor of a 
+# simpler model and a bigger part of the data set.
+
+# mod1 <- nlme::lme(julian_emergence_date ~ temperature * sex * species, 
+#                       random = ~ 1|population, data = complete_data)
+mod1 <- lme4::lmer(julian_emergence_date ~ temperature * sex * species + (1|population), 
+                       data = complete_data)
+
+car::Anova(mod1, type = 2)
+
+# mod1_with_weight_loss <- lme4::lmer(
+#   julian_emergence_date ~ temperature * rel_weight_emergence * sex * species + (1|population), 
+#                        data = complete_data)
+
+# mod1_glance <- nlme::lme(julian_emergence_date ~ temperature * sex * species, 
+#                          random = ~ 1 | population, data = complete_data)
+
+# grid <- complete_data %>% data_grid(temperature, species, sex, population) %>%
+#   add_predictions(mod1, "julian_emergence_date") %>%
+#   group_by(temperature, species, sex) %>%
+#   dplyr::summarise(julian_emergence_date = median(julian_emergence_date))
+
+mod1_tmp <- emmeans::emmeans(mod1, ~ temperature | species * sex)
+contrast(mod1_tmp, interaction = "pairwise", adjust = "holm")
+
+mod1_tmp <- emmeans::emmeans(mod1, ~ species | temperature * sex)
+contrast(mod1_tmp, interaction = "pairwise", adjust = "holm")
+
+mod1_tmp <- emmeans::emmeans(mod1, ~ sex | species * temperature)
+contrast(mod1_tmp, interaction = "pairwise", adjust = "holm")
+
+
+```
+
+### Weight loss model
+```{r, message=F, warning=F}
+
+# Model 2: LME with with the full data set, including all samples that emerged during
+# the course of the experiment and their respective weight loss relative to the 
+# start of the experiment. Weekly-tracking data is not used in favor of a 
+# simpler model and a bigger part of the data set.
+
+# mod2 <- nlme::lme(rel_weight_emergence ~ temperature * species * sex, 
+#                       random = ~ 1|population, 
+#                       weights = varFixed(~as.numeric(temperature)),
+#                       data = complete_data)
+mod2 <- lme4::lmer(rel_weight_emergence ~ temperature * species * sex + (1|population), 
+                         data = complete_data)
+
+car::Anova(mod2, type = 2)
+
+```
+
+### Rate of weight loss model
+```{r}
+# Model 2.1: LME with with the full data set, including all samples that emerged during
+# the course of the experiment and their respective weight loss relative to the 
+# start of the experiment. Weekly-tracking data is not used in favor of a 
+# simpler model and a bigger part of the data set.
+
+# mod2 <- nlme::lme(rel_weight_emergence ~ temperature * species * sex, 
+#                       random = ~ 1|population, 
+#                       weights = varFixed(~as.numeric(temperature)),
+#                       data = complete_data)
+mod2.1 <- lme4::lmer(weight_loss_per_day ~ temperature * species * sex + (1|population), 
+                         data = complete_data)
+
+car::Anova(mod2.1, type = 2)
+
+# mod2.1_tmp <- emmeans::emmeans(mod2.1, ~ temperature | species * sex)
+# contrast(mod4_tmp, interaction = "pairwise", adjust = "holm")
+# 
+# mod2.1_tmp <- emmeans::emmeans(mod2.1, ~ species | temperature * sex)
+# contrast(mod4_tmp, interaction = "pairwise", adjust = "holm")
+# 
+# mod2.1_tmp <- emmeans::emmeans(mod2.1, ~ sex | species * temperature)
+# contrast(mod4_tmp, interaction = "pairwise", adjust = "holm")
+```
+
+### GAMM weekly weight loss model
+```{r}
+
+#Model 3: Generative Additive Mixed Effect Model (GAMM) with data from
+# all weekly-tracking samples and weights at weeks after hatching imputed 
+# (imputed values equals values at emergence/hatching)
+# Additional Info: With a GAM, week can be modeled as a smooth term (with temperature, species 
+# and sex as interaction terms) such that variations of weight loss across time
+# can be more accurately captured by the model
+
+mod3 <- gamm(formula = rel_weight ~
+                   s(week, k = 10, by = interaction(temperature, species, sex)) +
+                   temperature * species * sex, family = "gaussian",
+                 random = list(population = ~1, sample_ID = ~1),
+                 data = weekly_tracking_data, method = "REML")
+
+mod3$gam$call <- quote(gamm(formula = rel_weight ~
+                                  s(week, k = 10, by = interaction(temperature, species, sex)) +
+                                  temperature * species * sex, family = "gaussian",
+                                random = list(population = ~1, sample_ID = ~1),
+                                data = weekly_tracking_data, method = "REML"))
+
+```
+
+### Survival model
+```{r, message=F, warning=F}
+# Model 4: Generalised Linear Mixed Effect Model (GLME) on survival data set,
+# containing all samples and whether or not they were alive or dead at emergence
+# or at the finishing time of the experiment when all remaining individuals were excised
+# from their cocoons
+
+mod4 <- glmer(survival ~ temperature * species * sex + (1|population), 
+                  family = binomial, data = survival_data)
+
+car::Anova(mod4, type = 2)
+
+mod4_tmp <- emmeans::emmeans(mod4, ~ temperature | species * sex)
+contrast(mod4_tmp, interaction = "pairwise", adjust = "holm")
+# 
+# mod4_tmp <- emmeans::emmeans(mod4, ~ species | temperature * sex)
+# contrast(mod4_tmp, interaction = "pairwise", adjust = "holm")
+# 
+# mod4_tmp <- emmeans::emmeans(mod4, ~ sex | species * temperature)
+# contrast(mod4_tmp, interaction = "pairwise", adjust = "holm")
+
+# Testing species an sex differences in survival
+survival_data %>% dplyr::count(species, emergence_condition)
+survival_data %>% dplyr::count(species, emergence_condition) %>% 
+  pull(n) %>% matrix(ncol = 2) %>% fisher.test()
+
+survival_data %>% filter(species == "O. bicornis") %>% 
+  dplyr::count(sex, emergence_condition)
+survival_data %>% filter(species == "O. bicornis") %>% 
+  dplyr::count(sex, emergence_condition) %>% 
+  pull(n) %>% matrix(ncol = 2) %>% fisher.test()
+
+survival_data %>% filter(species == "O. cornuta") %>% 
+  dplyr::count(sex, emergence_condition)
+survival_data %>% filter(species == "O. cornuta") %>% 
+  dplyr::count(sex, emergence_condition) %>% 
+  pull(n) %>% matrix(ncol = 2) %>% fisher.test()
+
+```
+
+### Influence of initial body weight or body size on emergence model
+```{r, message=F, warning=F}
+# Model 5: LME with with the full data set, including all samples that emerged during
+# the course of the experiment and their respective weight loss relative to the 
+# start of the experiment. The model tests the influence of initial body weight on emergence
+
+mod5 <- lme4::lmer(julian_emergence_date ~ temperature * sex * species * 
+                     start_weight + (1|population), 
+                       data = complete_data)
+
+car::Anova(mod5, type = 2)
+
+
+
+# mod5.1 <- lme4::lmer(julian_emergence_date ~ temperature * sex * species * 
+#                      length + (1|population), 
+#                        data = complete_data)
+# 
+# car::Anova(mod5.1, type = 2)
+
+rsq::rsq(mod1)
+rsq::rsq(mod5)
+#rsq::rsq(mod5.1)
+```
+
+### Influence of starting body weight or body size on weight loss model
+```{r, message=F, warning=F}
+# Model 6: LME with with the full data set, including all samples that emerged during
+# the course of the experiment and their respective weight loss relative to the 
+# start of the experiment. The model tests the influence of initial body weight on weight loss
+
+mod6 <- lme4::lmer(rel_weight_emergence ~ temperature * species * sex * 
+                     start_weight + (1|population), 
+                         data = complete_data)
+
+car::Anova(mod6, type = 2)
+
+# mod6.1 <- lme4::lmer(rel_weight_emergence ~ temperature * species * sex * 
+#                      length + (1|population), 
+#                          data = complete_data)
+# 
+# car::Anova(mod6.1, type = 2)
+
+rsq::rsq(mod2)
+rsq::rsq(mod6)
+#rsq::rsq(mod6.1)
+```
+
+
+### Moderated Mediation Analysis
+
+```{r}
+# Mediation analysis with multilevel linear models to test if weight loss as a 
+# mediator variable (moderated by the interaction variables species and sex) 
+# is able to explain the effect of temperature on emergence timing 
+
+lme_mod_med <- lme4::lmer(rel_weight_emergence ~ temperature * species * sex + (1|population), 
+                         data = complete_data)
+
+lme_mod_IV <- lme4::lmer(
+  julian_emergence_date ~ temperature * species * sex + rel_weight_emergence * species * sex + (1|population),
+  data = complete_data)
+```
+
+
+```{r, warning=F, message=F}
+general_mediation_model <- mediation::mediate(
+  lme_mod_med, lme_mod_IV, sims = 300,
+  control.value = "control", treat.value = "SSP5-8.5", 
+  treat = "temperature", mediator = "rel_weight_emergence")
+
+# cornuta_mediation_model <- mediation::mediate(
+#   lme_mod_med, lme_mod_IV, sims = 300, covariates = list(species = "O. cornuta"),
+#   control.value = "control", treat.value = "SSP5-8.5", robustSE = TRUE, 
+#   treat = "temperature", mediator = "rel_weight_emergence")
+# 
+# bicornis_mediation_model <- mediation::mediate(
+#   lme_mod_med, lme_mod_IV, sims = 300, covariates = list(species = "O. bicornis"),
+#   control.value = "control", treat.value = "SSP5-8.5", robustSE = TRUE,
+#   treat = "temperature", mediator = "rel_weight_emergence")
+
+summary(general_mediation_model)
+# summary(cornuta_mediation_model)
+# summary(bicornis_mediation_model)
+
+```
+
+
+## Plots
+
+```{r, message=F}
+# Plot 1
+ssp_names <- c(
+  normal = "control",
+  plus3 = "SSP2-4.5",
+  plus6 = "SSP5-8.5"
+)
+temp_logger_data <- temp_logger_data %>% 
+  mutate(cabinet = factor(cabinet, levels = c("ref+6", "ref+3", "ref", "F", "E", "C"))) %>% 
+  mutate(group = factor(group, levels = c("plus6", "plus3", "normal")))
+plot1 <- temp_logger_data %>% filter(cabinet %in% c("ref", "ref+3", "ref+6")) %>% 
+  ggplot() + geom_line(aes(x = datetime, y = temp, group = cabinet), alpha = 0.5) + 
+  geom_line(data = temp_logger_data %>% filter(cabinet %in% c("C", "E", "F")),
+            aes(x = datetime, y = temp, color = cabinet, group = cabinet)) + 
+  scale_x_datetime(name = element_blank()) + 
+  facet_wrap(vars(group), nrow = 3, labeller = labeller(group = ssp_names)) + 
+  scale_color_discrete(guide = "none", type = rev(customPalette1)) + 
+  ylab("temperature [°C]") + 
+  theme_minimal() +
+  theme(panel.border = element_rect(fill = NA),
+        axis.ticks = element_line(),
+        plot.margin = unit(c(0.25,0.25,0.25,0.25), "cm"),
+        axis.text.x = element_text(size = 10),
+        axis.title.y = element_text(size = 10, face = "bold"),
+        axis.text.y = element_text(size = 10),
+        strip.text = element_text(size = 12, face = "bold")
+        )
+
+png(file = "plots/plot1.png", width=7.5, height=5, units = "in", res = 600)
+print(plot1)
+dev.off()  
+
+plot1
+```
+
+
+```{r, message=F}
+# Plot 2.1
+plot2.1 <- complete_data %>% 
+  mutate(species_sex_symbolic = paste0("*", species, "* (", '<span style="font-family:Sans-Serif;font-size:14px">', sex_symbolic, '</span>', ")")) %>% 
+  mutate(temperature = factor(temperature, levels = c("SSP5-8.5", "SSP2-4.5", "control"))) %>% 
+  ggplot() + 
+  geom_histogram(aes(x = julian_emergence_date, fill = species_sex_symbolic), binwidth = 1) + 
+  scale_fill_discrete(type = customPalette2, name = NULL, 
+                      guide = guide_legend(reverse = TRUE)) + 
+  scale_x_continuous(name = "emergence date [Julian days]") + 
+  scale_y_continuous(name = "number of emerged individuals") + 
+  facet_wrap(vars(temperature), nrow = 3) + theme_minimal() +
+  theme(panel.border = element_rect(fill = NA),
+      axis.ticks = element_line(),
+      plot.margin = unit(c(0.25,0.25,0.5,0.25), "cm"),
+      axis.text.x = element_text(size = 10),
+      axis.title.y = element_text(size = 10, face = "bold"),
+      axis.text.y = element_text(size = 10),
+      axis.title.x = element_text(size = 10, face = "bold"),
+      strip.text = element_text(size = 12, face = "bold"),
+      legend.position = "bottom",
+      legend.text = ggtext::element_markdown(size = 12),
+      legend.box.background = element_rect(
+        fill = "white", color = "black", linewidth = 0.2),
+      legend.key.height = unit(0.25, "cm")
+      )
+
+
+png(file = "plots/plot2.1.png", width=7.5, height=5, units = "in", res = 600)
+print(plot2.1)
+dev.off()  
+```
+
+```{r, warning = F, message=F}
+#Plot 2.2
+emm_options(parens = "a^")
+mod_tmp <- emmeans::emmeans(mod1, ~ temperature | species * sex)
+emergence_temp_focused_res <- contrast(mod_tmp, interaction = "pairwise", adjust = "holm") %>% 
+  as_tibble() %>% separate_wider_delim(ends_with("pairwise"), delim = " - ", 
+                     names = c("group1", "group2")) %>% 
+  dplyr::select(group1, group2, p.value, everything()) %>% 
+  mutate(p.signif.label = symnum(p.value, corr = FALSE, na = FALSE, 
+                         cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 1), 
+                         symbols = c("****", "***", "**", "*", "ns"))) %>% 
+  mutate(p.val.label = ifelse(p.value > 0.01, paste0("Padj = ", round(p.value, 2)),
+                              "Padj < 0.01")) %>%
+  mutate(sex_symbolic = ifelse(sex == "female", "\U2640", "\U2642")) %>% 
+  mutate(species_sex_symbolic = paste0(
+    "*", species, "* (", 
+    '<span style="font-family:Sans-Serif;font-size:18px;font-weigth:900">',
+    sex_symbolic, '</span>', ")"))
+  
+plot2.2 <- complete_data %>%
+  mutate(species_sex_symbolic = paste0("*", species, "* (", '<span style="font-family:Sans-Serif;font-size:18px;font-weigth:900">', sex_symbolic, '</span>', ")")) %>% 
+  ggplot(aes(y = julian_emergence_date, x = temperature)) +
+  geom_boxplot() + #geom_point(data = grid, colour = "red") +
+  facet_wrap(vars(species_sex_symbolic), ncol = 2, nrow = 2) + 
+  ylab("emergence date [Julian days]") + 
+  ylim(c(25, 150)) +
+  ggpubr::stat_pvalue_manual(
+    emergence_temp_focused_res, 
+    label = "p.signif.label", y.position = c(130, 150, 140)) + 
+  theme_minimal() +
+  theme(panel.border = element_rect(fill = NA),
+      axis.ticks = element_line(),
+      plot.margin = unit(c(0.25,0.25,0.25,0.25), "cm"),
+      panel.grid.major.x = element_blank(),
+      axis.text.x = element_text(size = 10),
+      axis.title.x = element_blank(),
+      axis.text.x.bottom = element_text(size = 10, face = "bold", color = "black"),
+      axis.title.y = element_text(size = 10, face = "bold"),
+      axis.text.y = element_text(size = 10),
+      strip.text = ggtext::element_markdown(size = 12, face = "bold"),
+      legend.position = "bottom"
+      )
+
+png(file = "plots/plot2.2.png", width=7.5, height=5, units = "in", res = 600)
+print(plot2.2)
+dev.off()  
+
+```
+
+```{r, warning = F, message=F}
+# Combined Plot 2 / Emergence
+combined_plot2 <- plot2.1 / plot2.2 + 
+  patchwork::plot_annotation(tag_levels = list(c("(a)", "(b)")))
+
+png(file = "plots/plot2_combined.png", width=7.5, height=10, units = "in", res = 600)
+print(combined_plot2)
+dev.off()  
+
+combined_plot2
+```
+
+
+```{r, warning = F, message=F}
+
+# Plot 3.1
+emmeans <- emmeans(mod3$gam, c("week", "temperature", "species", "sex"),
+                   cov.reduce = F) %>% as_tibble() %>% 
+  mutate(sex_symbolic = ifelse(sex == "female", "\U2640", "\U2642")) %>% 
+  mutate(species_sex_symbolic = paste0(
+    "*", species, "* (", 
+    '<span style="font-family:Sans-Serif;font-size:18px;font-weigth:900">',
+    sex_symbolic, '</span>', ")"))
+
+plot3.1 <- weekly_tracking_data %>% mutate(rel_weight = 100 * (1 - rel_weight)) %>% 
+  mutate(species_sex_symbolic = paste0(
+    "*", species, "* (", 
+    '<span style="font-family:Sans-Serif;font-size:18px;font-weigth:900">', 
+    sex_symbolic, '</span>', ")")) %>% 
+  summarySE(measurevar = "rel_weight", 
+            groupvars = c("week", "temperature", "species_sex_symbolic"), 
+            conf.interval = 0.95, na.rm = F) %>% 
+  ggplot() + geom_point(aes(x = week, y = rel_weight, color = temperature)) + 
+  geom_line(data = emmeans, aes(x = week, y = 100 * (1 - emmean), 
+                                color = temperature)) + 
+  facet_wrap(vars(species_sex_symbolic), 
+             labeller = label_wrap_gen(multi_line = F), ncol = 4) + 
+  ylab("cumulative weight loss [%]") + 
+  xlab("experimental time [weeks]") +
+  scale_color_manual(values = customPalette1, 
+                     guide = guide_legend(title = element_blank()),
+                     labels = c("control", "SSP2-4.5", "SSP5-8.5")) + 
+  geom_line(data = emmeans, aes(x = week, y = 100 * (1 - lower.CL), group = temperature), lty = 2) +
+  geom_line(data = emmeans, aes(x = week, y = 100 * (1 - upper.CL), group = temperature), lty = 2) +
+  theme_minimal() + 
+  theme(panel.border = element_rect(fill = NA),
+      axis.ticks = element_line(),
+      plot.margin = unit(c(0.25,0.25,0.5,0.25), "cm"),
+      axis.text.x = element_text(size = 10),
+      axis.title.y = element_text(size = 10, face = "bold"),
+      axis.text.y = element_text(size = 10),
+      axis.title.x = element_text(size = 10, face = "bold"),
+      strip.text = element_markdown(size = 12, face = "bold"),
+      legend.position = "bottom",
+      legend.title = element_blank(),
+      legend.text = element_text(size = 12),
+      legend.box.background = element_rect(
+        fill = "white", color = "black", linewidth = 0.2),
+      legend.key.height = unit(0.25, "cm")
+      )
+
+png(file = "plots/plot3.1.png", width=7.5, height=5, units = "in", res = 600)
+print(plot3.1)
+dev.off()  
+```
+
+```{r, warning = F, message=F}
+
+# Plot 3.2
+emm_options(parens = "a^")
+mod_tmp <- emmeans::emmeans(mod2, ~ temperature | species * sex)
+temp_focused_res <- contrast(mod_tmp, interaction = "pairwise", adjust = "holm") %>% 
+  as_tibble() %>% separate_wider_delim(ends_with("pairwise"), delim = " - ", 
+                     names = c("group1", "group2")) %>% 
+  dplyr::select(group1, group2, p.value, everything()) %>% 
+  mutate(p.signif.label = symnum(p.value, corr = FALSE, na = FALSE, 
+                         cutpoints = c(0, 0.0001, 0.001, 0.01, 0.05, 1), 
+                         symbols = c("****", "***", "**", "*", "ns"))) %>% 
+  mutate(p.val.label = ifelse(p.value > 0.01, paste0("Padj = ", round(p.value, 2)),
+                              "Padj < 0.01")) %>%
+  mutate(sex_symbolic = ifelse(sex == "female", "\U2640", "\U2642")) %>% 
+  mutate(species_sex_symbolic = paste0(
+    "*", species, "* (", 
+    '<span style="font-family:Sans-Serif;font-size:18px;font-weigth:900">',
+    sex_symbolic, '</span>', ")"))
+
+plot3.2 <- complete_data %>%
+  mutate(species_sex_symbolic = paste0(
+    "*", species, "* (", 
+    '<span style="font-family:Sans-Serif;font-size:18px;font-weigth:900">',
+    sex_symbolic, '</span>', ")")) %>% 
+  ggplot(aes(y = (1 - rel_weight_emergence) * 100, x = temperature)) +
+  geom_boxplot() + facet_wrap(vars(species_sex_symbolic), 
+                              labeller = label_wrap_gen(multi_line = FALSE)) + 
+  ylab("cumulative weight loss at emergence [%]") + 
+  ylim(c(3, 29)) + 
+  ggpubr::stat_pvalue_manual(temp_focused_res, label = "p.signif.label", 
+                             y.position = c(24, 28, 26)) + 
+  theme_minimal() + 
+  theme(panel.border = element_rect(fill = NA),
+      axis.ticks = element_line(),
+      plot.margin = unit(c(0.25,0.25,0.25,0.25), "cm"),
+      axis.text.x = element_text(size = 10, face = "bold", colour = "black"),
+      axis.title.y = element_text(size = 10, face = "bold"),
+      axis.text.y = element_text(size = 10),
+      axis.title.x = element_blank(),
+      strip.text = element_markdown(size = 12, face = "bold"),
+      legend.position = "bottom",
+      legend.title = element_blank(),
+      legend.text = element_text(size = 10),
+      legend.box.background = element_rect(
+        fill = "white", color = "black", linewidth = 0.2),
+      legend.key.height = unit(0.25, "cm")
+      )
+
+png(file = "plots/plot3.2.png", width=7.5, height=5, units = "in", res = 600)
+print(plot3.2)
+dev.off()  
+```
+
+```{r, warning = F, message=F}
+
+# Combined Plot 3 / Weight loss
+combined_plot3 <- plot3.1 / plot3.2 + 
+  patchwork::plot_annotation(tag_levels = list(c("(a)", "(b)")))
+
+png(file = "plots/plot3_combined.png", width=7.5, height=10, units = "in", res = 600)
+print(combined_plot3)
+dev.off()  
+
+combined_plot3
+```
+
+```{r, warning = F, message=F}
+
+# Plot 4 / Survival
+
+plot4 <- survival_summary_data %>% 
+  mutate(species_sex_symbolic = paste0(
+    "*", species, "* (", 
+    '<span style="font-family:Sans-Serif;font-size:18px;font-weigth:900">',
+    sex_symbolic, '</span>', ")")) %>% 
+  ggplot() + 
+  geom_col(aes(y = temperature, x = rel_survival * 100, 
+           group = species_sex_symbolic, 
+           fill = species_sex_symbolic)) + 
+  facet_wrap(vars(fct_relevel(species_sex_symbolic, rev(unique(species_sex_symbolic)))), nrow = 4) + 
+  xlab("survival rate [%]") +
+  scale_fill_discrete(type = customPalette2, name = NULL, 
+                      guide = guide_legend(reverse = T)) +
+  theme_minimal() + coord_cartesian(xlim = c(77.5, 100)) + 
+  theme(panel.border = element_rect(fill = NA),
+      axis.ticks = element_line(),
+      plot.margin = unit(c(0.25,0.25,0.25,0.25), "cm"),
+      axis.text.y = element_text(size = 10, colour = "black", face = "bold"),
+      axis.title.x = element_text(size = 10, face = "bold"),
+      axis.text.x = element_text(size = 10),
+      axis.title.y = element_blank(),
+      strip.text = element_blank(),
+      legend.position = "bottom",
+      legend.title = element_blank(),
+      legend.text = element_markdown(size = 12),
+      legend.box.background = element_rect(
+        fill = "white", color = "black", linewidth = 0.2),
+      legend.key.height = unit(0.25, "cm")
+      )
+
+png(file = "plots/plot4.png", width=7.5, height=7.5, units = "in", res = 600)
+print(plot4)
+dev.off()  
+
+plot4
+```
+## Supplemental plots
+
+```{r, warning = F, message=F}
+
+
+# Supplemental plot 1.1
+supp_plot1.1 <- complete_data %>%  mutate(species_sex_symbolic = paste0(
+    "*", species, "* (", 
+    '<span style="font-family:Sans-Serif;font-size:18px;font-weigth:900">',
+    sex_symbolic, '</span>', ")")) %>% 
+  ggplot(aes(y = (weight_loss_per_day), x = temperature, 
+             color = species_sex_symbolic)) +
+  geom_boxplot() +
+  facet_wrap(vars(species)) + ylab("rate of weight loss [%/d]") +
+  scale_fill_discrete(type = customPalette2, name = NULL, 
+                      guide = guide_legend(reverse = T)) +
+  theme_minimal() + 
+  theme(panel.border = element_rect(fill = NA),
+      axis.ticks = element_line(),
+      plot.margin = unit(c(0.25,0.25,0.25,0.25), "cm"),
+      axis.text.y = element_text(size = 10, colour = "black"),
+      axis.title.x = element_blank(),
+      axis.text.x = element_text(size = 10, face = "bold"),
+      axis.title.y = element_markdown(size = 10, face = "bold"),
+      strip.text = element_blank(),
+      legend.position = "none"
+      )
+
+# Supplemental plot 1.2 
+supp_plot1.2 <- complete_data %>% mutate(species_sex_symbolic = paste0(
+    "*", species, "* (", 
+    '<span style="font-family:Sans-Serif;font-size:18px;font-weigth:900">',
+    sex_symbolic, '</span>', ")")) %>% 
+  ggplot(aes(y = (weight_loss_per_day), x = temperature, 
+             color = species_sex_symbolic)) +
+  geom_boxplot() +
+  facet_wrap(vars(sex)) + ylab("rate of weight loss [%/d]") +
+  scale_fill_discrete(type = customPalette2, name = NULL, 
+                      guide = guide_legend(reverse = T)) +
+  theme_minimal() + 
+  theme(panel.border = element_rect(fill = NA),
+      axis.ticks = element_line(),
+      plot.margin = unit(c(0.25,0.25,0.25,0.25), "cm"),
+      axis.text.y = element_text(size = 10, colour = "black"),
+      axis.title.x = element_blank(),
+      axis.text.x = element_text(size = 10, face = "bold"),
+      axis.title.y = element_markdown(size = 10, face = "bold"),
+      strip.text = element_blank(),
+      legend.position = "bottom",
+      legend.title = element_blank(),
+      legend.text = element_markdown(size = 12, face = "bold"),
+      legend.box.background = element_rect(
+        fill = "white", color = "black", linewidth = 0.2),
+      legend.key.height = unit(0.25, "cm")
+      )
+
+# Combined Supplemental Plot 1 / Species and sex differences in rate of weight loss
+combined_supp_plot1 <- supp_plot1.1 / supp_plot1.2 + 
+  patchwork::plot_annotation(tag_levels = list(c("(a)", "(b)")))
+
+png(file = "plots/supp_plot1_combined.png", width=7.5, height=10, units = "in", res = 600)
+print(combined_supp_plot1)
+dev.off()  
+
+combined_supp_plot1 
+```
+
+
+```{r, warning = F, message=F}
+
+# Supplemental Plot 2.1
+supp_plot2.1 <- complete_data %>% mutate(species_sex_symbolic = paste0(
+    "*", species, "* (", 
+    '<span style="font-family:Sans-Serif;font-size:18px;font-weigth:900">',
+    sex_symbolic, '</span>', ")")) %>% ggplot() + 
+  aes(x = start_weight, y = julian_emergence_date, color = temperature) + 
+  geom_point() + facet_wrap(vars(species_sex_symbolic), ncol = 2) + 
+  geom_smooth(method = "lm") + 
+  ylab("emergence date [Julian days]") + xlab("initial body weight [mg]") + 
+  scale_color_discrete(type = customPalette1, name = NULL) +
+  theme_minimal() + 
+  theme(panel.border = element_rect(fill = NA),
+      axis.ticks = element_line(),
+      plot.margin = unit(c(0.25,0.25,0.25,0.25), "cm"),
+      axis.text.y = element_text(size = 10, colour = "black"),
+      axis.title.x = element_text(size = 10, face = "bold"),
+      axis.text.x = element_text(size = 10),
+      axis.title.y = element_markdown(size = 10, face = "bold"),
+      strip.text = element_markdown(size = 12, face = "bold"),
+      legend.position = "none"
+      )
+
+# Supplemental Plot 2.2
+supp_plot2.2 <- complete_data %>% mutate(species_sex_symbolic = paste0(
+    "*", species, "* (", 
+    '<span style="font-family:Sans-Serif;font-size:18px;font-weigth:900">',
+    sex_symbolic, '</span>', ")")) %>% ggplot() + 
+  aes(x = start_weight, y = 100 * (1 - rel_weight_emergence), color = temperature) + 
+  geom_point() + facet_wrap(vars(species_sex_symbolic), ncol = 2) + 
+  geom_smooth(method = "lm") + 
+  ylab("cumulative weight loss at emergence [%]") + xlab("initial body weight [mg]") +
+  scale_color_discrete(type = customPalette1, name = NULL) +
+  theme_minimal() + 
+  theme(panel.border = element_rect(fill = NA),
+      axis.ticks = element_line(),
+      plot.margin = unit(c(0.25,0.25,0.25,0.25), "cm"),
+      axis.text.y = element_text(size = 10, colour = "black"),
+      axis.title.x = element_text(size = 10, face = "bold"),
+      axis.text.x = element_text(size = 10),
+      axis.title.y = element_markdown(size = 10, face = "bold"),
+      strip.text = element_markdown(size = 12, face = "bold"),
+      legend.position = "bottom",
+      legend.title = element_blank(),
+      legend.text = element_markdown(size = 12, face = "bold"),
+      legend.box.background = element_rect(
+        fill = "white", color = "black", linewidth = 0.2),
+      legend.key.height = unit(0.25, "cm")
+      )
+
+
+
+# Combined Supplemental Plot 2 / Effect of body condition on weight loss and emergence
+combined_supp_plot2 <- supp_plot2.1 / supp_plot2.2 + 
+  patchwork::plot_annotation(tag_levels = list(c("(a)", "(b)")))
+  
+png(file = "plots/supp_plot2_combined.png", width=7.5, height=10, units = "in", res = 600)
+print(combined_supp_plot2)
+dev.off()  
+
+combined_supp_plot2
+```
+
